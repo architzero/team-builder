@@ -23,15 +23,24 @@ const generateTokens = (userId) => {
 // Register
 router.post('/register', authLimiter, validateRegister, async (req, res) => {
   try {
+    console.log('📝 Registration attempt:', { email: req.body.email, name: req.body.name });
+    
     const { name, email, password, college, year, skills } = req.body;
 
     if (!name || !email || !password) {
+      console.log('❌ Missing required fields');
       return res.status(400).json({ error: 'Name, email, and password are required' });
+    }
+
+    if (!name.trim() || name.trim().length < 2) {
+      console.log('❌ Invalid name length');
+      return res.status(400).json({ error: 'Name must be at least 2 characters' });
     }
 
     const normalizedEmail = email.toLowerCase().trim();
     const exists = await User.findOne({ email: normalizedEmail });
     if (exists) {
+      console.log('❌ Email already exists:', normalizedEmail);
       return res.status(400).json({ error: 'Email already registered' });
     }
 
@@ -40,19 +49,27 @@ router.post('/register', authLimiter, validateRegister, async (req, res) => {
       ? skills.split(',').map(s => s.trim()).filter(Boolean)
       : (Array.isArray(skills) ? skills : []);
     
-    const user = await User.create({
+    const user = new User({
       name: name.trim(), 
       email: normalizedEmail, 
       password: hashed, 
       college: college ? college.trim() : '',
       year: year ? parseInt(year) : 1,
-      skills: skillsArr
+      skills: skillsArr,
+      experienceLevel: 'beginner',
+      interests: [],
+      availability: 'available',
+      profileComplete: false
     });
+
+    await user.save();
+    console.log('✅ User created:', user._id);
 
     const { accessToken, refreshToken } = generateTokens(user._id);
     user.refreshToken = refreshToken;
     await user.save();
 
+    console.log('✅ Registration successful:', normalizedEmail);
     res.status(201).json({
       token: accessToken,
       refreshToken,
@@ -67,7 +84,7 @@ router.post('/register', authLimiter, validateRegister, async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('Registration error:', err);
+    console.error('❌ Registration error:', err);
     
     if (err.code === 11000) {
       return res.status(400).json({ error: 'Email already registered' });
@@ -75,6 +92,7 @@ router.post('/register', authLimiter, validateRegister, async (req, res) => {
     
     if (err.name === 'ValidationError') {
       const errors = Object.values(err.errors).map(e => e.message).join(', ');
+      console.error('❌ Validation errors:', errors);
       return res.status(400).json({ error: errors });
     }
     
@@ -174,9 +192,11 @@ router.get('/me', auth, async (req, res) => {
 // Google OAuth Login
 router.post('/google', async (req, res) => {
   try {
+    console.log('🔐 Google OAuth attempt');
     const { credential } = req.body;
     
     if (!credential) {
+      console.log('❌ No credential provided');
       return res.status(400).json({ error: 'Credential is required' });
     }
 
@@ -189,9 +209,12 @@ router.post('/google', async (req, res) => {
     const { sub: googleId, email, name, picture } = payload;
     const normalizedEmail = email.toLowerCase();
 
+    console.log('✅ Google token verified:', normalizedEmail);
+
     let user = await User.findOne({ $or: [{ googleId }, { email: normalizedEmail }] });
     
     if (!user) {
+      console.log('📝 Creating new user from Google OAuth');
       const randomPass = await bcrypt.hash(Math.random().toString(36), 10);
       user = await User.create({
         name,
@@ -206,16 +229,21 @@ router.post('/google', async (req, res) => {
         experienceLevel: 'beginner',
         profileComplete: false
       });
+      console.log('✅ New user created:', user._id);
     } else if (!user.googleId) {
+      console.log('❌ Email exists with password auth');
       return res.status(400).json({ 
         error: 'Email already registered with password. Please login with email/password.' 
       });
+    } else {
+      console.log('✅ Existing user found:', user._id);
     }
 
     const { accessToken, refreshToken } = generateTokens(user._id);
     user.refreshToken = refreshToken;
     await user.save();
 
+    console.log('✅ Google OAuth successful:', normalizedEmail);
     res.json({
       token: accessToken,
       refreshToken,
@@ -231,7 +259,7 @@ router.post('/google', async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('Google auth error:', err.message);
+    console.error('❌ Google auth error:', err.message);
     res.status(401).json({ error: 'Google authentication failed' });
   }
 });
