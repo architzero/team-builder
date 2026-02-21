@@ -337,67 +337,55 @@ const LangGraphState = Annotation.Root({
 async function plannerNode(state) {
   const userMessage = state.request?.message || '';
 
-  const plannerPrompt = `
-Return valid JSON:
-{
- "intent": "...",
- "tool": "match_candidates_by_skill"|"draft_intro_message"|"none",
- "arguments": {},
- "constraints": {
-   "count": number|null,
-   "skills_all": [],
-   "skills_any": [],
-   "college": string|null,
-   "year": number|null,
-   "availability": "available"|"unavailable"|"any"
- },
- "ask_user": string|null
-}
+  const plannerPrompt = `You are a tool planner. Respond with valid JSON only.
+
 User: "${userMessage}"
-`;
+
+If user wants to find people/teammates, use: {"tool":"match_candidates_by_skill","arguments":{"skills":["skill1","skill2"]}}
+If greeting/general question, use: {"tool":"none","ask_user":"your helpful response"}
+
+Respond with JSON only:`;
 
   const raw = await callAIJson(plannerPrompt);
   const parsed = safeJsonParse(raw);
-  const validated = PlannerOutputSchema.safeParse(parsed);
 
-  if (!validated.success) {
-    const fallback = await callAI(
-      `Respond helpfully to: "${userMessage}"`
-    );
+  if (!parsed || !parsed.tool) {
+    const fallback = await callAI(`Respond helpfully to: "${userMessage}"`);
     return {
       plan: { tool: 'none', arguments: {}, ask_user: fallback },
       constraints: {},
-      attempts: state.attempts || 0,
+      attempts: 0,
       maxAttempts: 2
     };
   }
 
-  const data = validated.data;
-
   return {
     plan: {
-      intent: data.intent || 'general',
-      tool: data.tool,
-      arguments: data.arguments || {},
-      ask_user: data.ask_user || null
+      tool: parsed.tool || 'none',
+      arguments: parsed.arguments || {},
+      ask_user: parsed.ask_user || null
     },
-    constraints: normalizeConstraints(data.constraints || {}),
-    attempts: state.attempts || 0,
-    maxAttempts: state.maxAttempts || 2
+    constraints: {},
+    attempts: 0,
+    maxAttempts: 2
   };
 }
 
 async function runToolNode(state) {
   const tool = TOOL_REGISTRY[state.plan?.tool];
-  if (!tool) return { candidatePool: [] };
+  if (!tool) return { candidatePool: [], selectedCandidates: [] };
 
   const result = await tool.invoke(state.plan.arguments || {});
 
   if (state.plan.tool === 'match_candidates_by_skill') {
-    return { candidatePool: result?.candidates || [], toolResult: result };
+    return { 
+      candidatePool: result?.candidates || [], 
+      selectedCandidates: result?.candidates || [],
+      toolResult: result 
+    };
   }
 
-  return { toolResult: result };
+  return { toolResult: result, selectedCandidates: [] };
 }
 
 async function selectorNode(state) {
@@ -457,32 +445,27 @@ async function retryNode(state) {
 }
 
 async function responderNode(state) {
-  const { plan, selectedCandidates, validation, attempts, maxAttempts } =
-    state;
+  const { plan, selectedCandidates } = state;
 
-  if (plan?.tool === 'none')
+  if (plan?.tool === 'none') {
     return { finalResponse: plan.ask_user || 'Provide more details.' };
-
-  if (validation?.ok) {
-    const lines = (selectedCandidates || []).map(
-      (u, i) => `${i + 1}. ${u.name} (${(u.skills || []).join(', ')})`
-    );
-    return {
-      finalResponse: `Found ${selectedCandidates.length} candidate(s):\n${lines.join(
-        '\n'
-      )}`
-    };
   }
 
-  if (!validation?.ok && attempts >= maxAttempts) {
-    return {
-      finalResponse: `Constraints not satisfied. Failed: ${validation.failedRules.join(
-        ', '
-      )}. Consider relaxing filters.`
-    };
+  if (plan?.tool === 'match_candidates_by_skill') {
+    const candidates = selectedCandidates || [];
+    if (!candidates.length) {
+      return { finalResponse: 'No matching candidates found.' };
+    }
+    const lines = candidates.map((c, i) => `${i + 1}. ${c.name} (${(c.skills || []).join(', ')})`);
+    return { finalResponse: `Found ${candidates.length} candidate(s):\n${lines.join('\n')}` };
   }
 
-  return { finalResponse: null };
+  if (plan?.tool === 'draft_intro_message') {
+    const draft = state.toolResult?.draft || 'Unable to generate draft.';
+    return { finalResponse: draft };
+  }
+
+  return { finalResponse: 'No response generated.' };
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -492,9 +475,6 @@ async function responderNode(state) {
 const langGraphApp = new StateGraph(LangGraphState)
   .addNode('planner', plannerNode)
   .addNode('toolRunner', runToolNode)
-  .addNode('selector', selectorNode)
-  .addNode('validator', validatorNode)
-  .addNode('retry', retryNode)
   .addNode('responder', responderNode)
 
   .addEdge(START, 'planner')
@@ -508,20 +488,7 @@ const langGraphApp = new StateGraph(LangGraphState)
     ['toolRunner', 'responder']
   )
 
-  .addEdge('toolRunner', 'selector')
-  .addEdge('selector', 'validator')
-
-  .addConditionalEdges(
-    'validator',
-    state => {
-      if (state.validation?.ok) return 'responder';
-      if ((state.attempts || 0) < (state.maxAttempts || 2)) return 'retry';
-      return 'responder';
-    },
-    ['responder', 'retry']
-  )
-
-  .addEdge('retry', 'planner')
+  .addEdge('toolRunner', 'responder')
   .addEdge('responder', END)
   .compile();
 
