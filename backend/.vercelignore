@@ -1,0 +1,9 @@
+.env
+.env.local
+.env.example
+.env.production.example
+node_modules
+.git
+*.md
+.gitignore
+seed.js
